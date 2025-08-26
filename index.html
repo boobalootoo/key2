@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Word Predictor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        #input-area {
+            width: 100%;
+            min-height: 200px;
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .prediction {
+            background-color: #f0f0f0;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 4px;
+        }
+        .prediction-list {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .prediction-item {
+            background: white;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .prediction-item:hover {
+            background: #e0e0e0;
+        }
+    </style>
+</head>
+<body>
+    <div id="input-area" contenteditable="true"></div>
+    <div class="prediction-list" id="prediction"></div>
+
+    <script>
+        // Initialize IndexedDB
+        const DB_NAME = 'wordPredictions';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'predictions';
+
+        let db;
+        
+        async function initDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                
+                request.onerror = () => reject(request.error);
+                request.onupgradeneeded = (event) => {
+                    db = event.target.result;
+                    const store = db.createObjectStore(STORE_NAME, { keyPath: 'pair' });
+                    store.createIndex('currentWord', 'currentWord');
+                    store.createIndex('nextWord', 'nextWord');
+                };
+                
+                request.onsuccess = () => {
+                    db = request.result;
+                    resolve(db);
+                };
+            });
+        }
+
+        // Cache for quick predictions
+        const predictionCache = new Map();
+
+        async function predictNextWord(currentWord) {
+            // Try cache first
+            if (predictionCache.has(currentWord)) {
+                return predictionCache.get(currentWord);
+            }
+
+            // Fallback to database
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            const index = store.index('currentWord');
+            
+            const request = index.getAll(IDBKeyRange.only(currentWord));
+            
+            return new Promise((resolve) => {
+                request.onsuccess = () => {
+                    const predictions = request.result || [];
+                    
+                    // Sort by frequency and store in cache
+                    const sorted = predictions.sort((a, b) => b.frequency - a.frequency);
+                    predictionCache.set(currentWord, sorted);
+                    
+                    resolve(sorted.slice(0, 5)); // Return top 5 predictions
+                };
+            });
+        }
+
+        async function savePrediction(currentWord, nextWord) {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            
+            // Update existing or create new entry
+            const request = store.get(`${currentWord}|${nextWord}`);
+            
+            return new Promise((resolve) => {
+                request.onsuccess = () => {
+                    const data = request.result || { 
+                        pair: `${currentWord}|${nextWord}`,
+                        currentWord,
+                        nextWord,
+                        frequency: 0 
+                    };
+                    
+                    data.frequency++;
+                    store.put(data);
+                    resolve();
+                };
+            });
+        }
+
+        // Initialize database and setup event listeners
+        initDB().then(() => {
+            const inputArea = document.getElementById('input-area');
+            const predictionDiv = document.getElementById('prediction');
+
+            function updatePrediction() {
+                const text = inputArea.innerText;
+                const words = text.trim().split(/\s+/);
+                const lastWord = words[words.length - 1];
+
+                if (lastWord) {
+                    predictNextWord(lastWord.toLowerCase()).then(predictions => {
+                        predictionDiv.innerHTML = '';
+                        
+                        if (predictions && predictions.length > 0) {
+                            predictions.forEach(prediction => {
+                                const item = document.createElement('div');
+                                item.className = 'prediction-item';
+                                item.textContent = prediction.nextWord;
+                                item.onclick = () => {
+                                    const selection = window.getSelection();
+                                    const range = selection.getRangeAt(0);
+                                    range.insertNode(document.createTextNode(` ${prediction.nextWord}`));
+                                };
+                                predictionDiv.appendChild(item);
+                            });
+                        } else {
+                            predictionDiv.innerHTML = '<div class="prediction">No predictions available</div>';
+                        }
+                    });
+                } else {
+                    predictionDiv.innerHTML = '<div class="prediction">Start typing...</div>';
+                }
+            }
+
+            let timeoutId;
+            inputArea.addEventListener('input', () => {
+                clearTimeout(timeoutId);
+                timeoutId = setTimeout(updatePrediction, 300);
+                
+                // Save prediction data
+                const text = inputArea.innerText;
+                const words = text.trim().split(/\s+/);
+                if (words.length >= 2) {
+                    const currentWord = words[words.length - 2].toLowerCase();
+                    const nextWord = words[words.length - 1].toLowerCase();
+                    savePrediction(currentWord, nextWord);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
